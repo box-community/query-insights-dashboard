@@ -7,15 +7,15 @@ import io
 import os
 import sys
 
-from box_sdk_gen import (
+from boxsdk import (
     BoxAPIError,
     BoxClient,
     CreateFolderParent,
     UploadFileAttributes,
     UploadFileAttributesParentField,
 )
-from box_sdk_gen.managers.file_metadata import CreateFileMetadataByIdScope
-from box_sdk_gen.managers.metadata_templates import (
+from boxsdk.managers.file_metadata import CreateFileMetadataByIdScope
+from boxsdk.managers.metadata_templates import (
     CreateMetadataTemplateFields,
     CreateMetadataTemplateFieldsTypeField,
 )

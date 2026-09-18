@@ -6,7 +6,7 @@ from __future__ import annotations
 import os
 import sys
 
-from box_sdk_gen import BoxAPIError, BoxClient
+from boxsdk import BoxAPIError, BoxClient
 from dotenv import load_dotenv
 
 from insights_client import get_box_client, post_insights

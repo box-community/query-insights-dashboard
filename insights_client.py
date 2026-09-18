@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import os
 
-from box_sdk_gen import BoxCCGAuth, BoxClient, CCGConfig, FetchOptions
+from boxsdk import BoxCCGAuth, BoxClient, CCGConfig, FetchOptions
 from dotenv import load_dotenv
 
 load_dotenv()
