@@ -39,6 +39,39 @@ def require_env() -> None:
         sys.exit(1)
 
 
+def _format_cell(value) -> str:
+    if value is None:
+        return "—"
+    if isinstance(value, float) and value.is_integer():
+        value = int(value)
+    if isinstance(value, int):
+        return f"{value:,}"
+    if isinstance(value, float):
+        return f"{value:,.2f}"
+    return str(value)
+
+
+def _print_table(headers: list[str], rows: list[list]) -> None:
+    str_rows = [[_format_cell(cell) for cell in row] for row in rows]
+    widths = [len(header) for header in headers]
+    for row in str_rows:
+        for index, cell in enumerate(row):
+            widths[index] = max(widths[index], len(cell))
+
+    def format_row(cells: list[str]) -> str:
+        parts = []
+        for index, cell in enumerate(cells):
+            # Labels stay left-aligned; numeric columns stay right-aligned.
+            aligned = cell.ljust(widths[index]) if index == 0 else cell.rjust(widths[index])
+            parts.append(aligned)
+        return "  ".join(parts)
+
+    print(format_row(headers))
+    print("  ".join("-" * width for width in widths))
+    for row in str_rows:
+        print(format_row(row))
+
+
 def print_contract_dashboard(
     template_ref: str,
     type_field: str,
@@ -60,17 +93,27 @@ def print_contract_dashboard(
         client, template_ref, folder_id, type_field, value_field
     )
 
-    print(f"Total contracts: {total}")
-    print(
-        "Value range: "
-        f"avg={stats['avgContractValue']}, "
-        f"min={stats['minContractValue']}, "
-        f"max={stats['maxContractValue']}"
+    print("Contract analytics dashboard")
+    print()
+    _print_table(
+        ["Metric", "Value"],
+        [
+            ["Total contracts", total],
+            ["Average value", stats["avgContractValue"]],
+            ["Minimum value", stats["minContractValue"]],
+            ["Maximum value", stats["maxContractValue"]],
+        ],
     )
+    print()
     # Buckets arrive ordered by document count, so print them as returned.
-    print("Top contract types:")
-    for row in groups:
-        print(f"  {row}")
+    print("Top contract types")
+    _print_table(
+        ["Type", "Total value", "Count"],
+        [
+            [row.get("contract_type"), row.get("total_value"), row.get("count")]
+            for row in groups
+        ],
+    )
 
 
 def main() -> None:

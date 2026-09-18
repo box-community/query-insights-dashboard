@@ -203,11 +203,20 @@ python dashboard.py
 With the sample data above, a successful run looks like:
 
 ```text
-Total contracts: 4
-Value range: avg=123750, min=45000, max=200000
-Top contract types:
-  {'contract_type': 'Sales', 'total_value': 300000, 'count': 2}
-  {'contract_type': 'Renewal', 'total_value': 195000, 'count': 2}
+Contract analytics dashboard
+
+Metric           Value
+---------------  -------
+Total contracts        4
+Average value    123,750
+Minimum value     45,000
+Maximum value    200,000
+
+Top contract types
+Type     Total value  Count
+-------  -----------  -----
+Sales        300,000      2
+Renewal      195,000      2
 ```
 
 Buckets are ordered by document count descending, so group order varies with
