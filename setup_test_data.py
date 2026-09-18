@@ -7,25 +7,34 @@ import io
 import os
 import sys
 
-from boxsdk import (
+from box_sdk_gen import (
     BoxAPIError,
     BoxClient,
+    CreateFileMetadataByIdScope,
     CreateFolderParent,
+    CreateMetadataTemplateFields,
+    CreateMetadataTemplateFieldsOptionsField,
+    CreateMetadataTemplateFieldsTypeField,
+    GetFileMetadataByIdScope,
+    GetMetadataTemplateScope,
+    UpdateFileMetadataByIdRequestBody,
+    UpdateFileMetadataByIdRequestBodyOpField,
+    UpdateFileMetadataByIdScope,
+    UpdateMetadataTemplateRequestBody,
+    UpdateMetadataTemplateRequestBodyOpField,
+    UpdateMetadataTemplateScope,
     UploadFileAttributes,
     UploadFileAttributesParentField,
 )
-from boxsdk.managers.file_metadata import CreateFileMetadataByIdScope
-from boxsdk.managers.metadata_templates import (
-    CreateMetadataTemplateFields,
-    CreateMetadataTemplateFieldsTypeField,
-)
 from dotenv import load_dotenv
 
-from insights_client import get_box_client
+from box_client import get_box_client
 
 load_dotenv()
 
-TEMPLATE_KEY = "sales"
+TEMPLATE_KEY = os.environ.get("TEMPLATE_KEY") or "sales"
+ENUM_FIELD_KEY = "contractType"
+ENUM_FALLBACK_KEY = "contractTypeEnum"
 FOLDER_NAME = "Sales Contracts"
 SAMPLE_CONTRACTS = [
     {"name": "Contract 1", "contractType": "Sales", "contractValue": 100000},
@@ -54,7 +63,44 @@ def require_env() -> None:
         sys.exit(1)
 
 
-def ensure_template(client: BoxClient) -> None:
+def _field_type(field) -> str:
+    return str(getattr(field.type, "value", field.type))
+
+
+def _template_fields(template) -> dict:
+    return {field.key: field for field in (template.fields or [])}
+
+
+def _enum_field_key(template) -> str | None:
+    fields = _template_fields(template)
+    preferred = fields.get(ENUM_FIELD_KEY)
+    if preferred and _field_type(preferred) == "enum":
+        return ENUM_FIELD_KEY
+    fallback = fields.get(ENUM_FALLBACK_KEY)
+    if fallback and _field_type(fallback) == "enum":
+        return ENUM_FALLBACK_KEY
+    return None
+
+
+def _add_enum_field(client: BoxClient, template_key: str) -> None:
+    client.metadata_templates.update_metadata_template(
+        UpdateMetadataTemplateScope.ENTERPRISE,
+        template_key,
+        [
+            UpdateMetadataTemplateRequestBody(
+                op=UpdateMetadataTemplateRequestBodyOpField.ADDFIELD,
+                data={
+                    "type": "enum",
+                    "key": ENUM_FALLBACK_KEY,
+                    "displayName": "Contract type",
+                    "options": [{"key": "Sales"}, {"key": "Renewal"}],
+                },
+            )
+        ],
+    )
+
+
+def ensure_template(client: BoxClient) -> str:
     try:
         client.metadata_templates.create_metadata_template(
             scope="enterprise",
@@ -62,9 +108,13 @@ def ensure_template(client: BoxClient) -> None:
             template_key=TEMPLATE_KEY,
             fields=[
                 CreateMetadataTemplateFields(
-                    type=CreateMetadataTemplateFieldsTypeField.STRING,
-                    key="contractType",
+                    type=CreateMetadataTemplateFieldsTypeField.ENUM,
+                    key=ENUM_FIELD_KEY,
                     display_name="Contract type",
+                    options=[
+                        CreateMetadataTemplateFieldsOptionsField(key="Sales"),
+                        CreateMetadataTemplateFieldsOptionsField(key="Renewal"),
+                    ],
                 ),
                 CreateMetadataTemplateFields(
                     type=CreateMetadataTemplateFieldsTypeField.FLOAT,
@@ -74,8 +124,27 @@ def ensure_template(client: BoxClient) -> None:
             ],
         )
         print(f"Created metadata template '{TEMPLATE_KEY}'.")
+        return ENUM_FIELD_KEY
     except Exception:
-        print(f"Metadata template '{TEMPLATE_KEY}' already exists; reusing it.")
+        template = client.metadata_templates.get_metadata_template(
+            GetMetadataTemplateScope.ENTERPRISE, TEMPLATE_KEY
+        )
+        type_field = _enum_field_key(template)
+        if type_field:
+            if type_field != ENUM_FIELD_KEY:
+                print(
+                    f"Metadata template '{TEMPLATE_KEY}' already exists with "
+                    f"string {ENUM_FIELD_KEY}; grouping on enum {type_field}."
+                )
+            else:
+                print(f"Metadata template '{TEMPLATE_KEY}' already exists; reusing it.")
+            return type_field
+        _add_enum_field(client, TEMPLATE_KEY)
+        print(
+            f"Metadata template '{TEMPLATE_KEY}' already exists with string "
+            f"{ENUM_FIELD_KEY}; added enum field {ENUM_FALLBACK_KEY}."
+        )
+        return ENUM_FALLBACK_KEY
 
 
 def ensure_folder(client: BoxClient) -> str:
@@ -90,8 +159,8 @@ def ensure_folder(client: BoxClient) -> str:
     return folder.id
 
 
-def existing_file_names(client: BoxClient, folder_id: str) -> set[str]:
-    names: set[str] = set()
+def existing_files(client: BoxClient, folder_id: str) -> dict[str, str]:
+    files: dict[str, str] = {}
     offset = 0
     limit = 1000
     while True:
@@ -101,36 +170,82 @@ def existing_file_names(client: BoxClient, folder_id: str) -> set[str]:
         entries = items.entries or []
         for item in entries:
             if item.type == "file":
-                names.add(item.name)
+                files[item.name] = item.id
         if len(entries) < limit:
             break
         offset += limit
-    return names
+    return files
 
 
-def upload_contracts(client: BoxClient, folder_id: str) -> None:
-    existing = existing_file_names(client, folder_id)
+def _metadata_payload(contract: dict, type_field: str) -> dict:
+    payload = {
+        type_field: contract["contractType"],
+        "contractValue": contract["contractValue"],
+    }
+    if type_field != ENUM_FIELD_KEY:
+        payload[ENUM_FIELD_KEY] = contract["contractType"]
+    return payload
+
+
+def _current_metadata(client: BoxClient, file_id: str) -> dict:
+    current = client.file_metadata.get_file_metadata_by_id(
+        file_id, GetFileMetadataByIdScope.ENTERPRISE, TEMPLATE_KEY
+    )
+    data = current.to_dict()
+    extra = data.pop("extra_data", None) or {}
+    merged = {**extra, **data}
+    return {key: value for key, value in merged.items() if not key.startswith("$")}
+
+
+def apply_metadata(client: BoxClient, file_id: str, payload: dict) -> None:
+    try:
+        client.file_metadata.create_file_metadata_by_id(
+            file_id,
+            CreateFileMetadataByIdScope.ENTERPRISE,
+            TEMPLATE_KEY,
+            payload,
+        )
+        return
+    except BoxAPIError:
+        current = _current_metadata(client, file_id)
+        ops = []
+        for key, value in payload.items():
+            op = (
+                UpdateFileMetadataByIdRequestBodyOpField.REPLACE
+                if key in current
+                else UpdateFileMetadataByIdRequestBodyOpField.ADD
+            )
+            ops.append(
+                UpdateFileMetadataByIdRequestBody(
+                    op=op, path=f"/{key}", value=value
+                )
+            )
+        if ops:
+            client.file_metadata.update_file_metadata_by_id(
+                file_id,
+                UpdateFileMetadataByIdScope.ENTERPRISE,
+                TEMPLATE_KEY,
+                ops,
+            )
+
+
+def upload_contracts(client: BoxClient, folder_id: str, type_field: str) -> None:
+    existing = existing_files(client, folder_id)
     for contract in SAMPLE_CONTRACTS:
         filename = f"{contract['name']}.txt"
+        payload = _metadata_payload(contract, type_field)
         if filename in existing:
-            print(f"Skipping {filename}; already in the folder.")
+            apply_metadata(client, existing[filename], payload)
+            print(f"Updated metadata on {filename}.")
             continue
         uploaded = client.uploads.upload_file(
             attributes=UploadFileAttributes(
                 name=filename,
                 parent=UploadFileAttributesParentField(id=folder_id),
             ),
-            file=io.BytesIO(b"Sample contract for query insights."),
+            file=io.BytesIO(b"Sample contract for Box Query Insights API."),
         )
-        client.file_metadata.create_file_metadata_by_id(
-            uploaded.entries[0].id,
-            CreateFileMetadataByIdScope.ENTERPRISE,
-            TEMPLATE_KEY,
-            {
-                "contractType": contract["contractType"],
-                "contractValue": contract["contractValue"],
-            },
-        )
+        apply_metadata(client, uploaded.entries[0].id, payload)
         print(f"Uploaded and tagged {filename}.")
 
 
@@ -146,9 +261,9 @@ if __name__ == "__main__":
         )
 
         enterprise_id = os.environ["BOX_ENTERPRISE_ID"]
-        ensure_template(client)
+        type_field = ensure_template(client)
         folder_id = ensure_folder(client)
-        upload_contracts(client, folder_id)
+        upload_contracts(client, folder_id, type_field)
 
         template_ref = f"enterprise_{enterprise_id}:{TEMPLATE_KEY}"
         print()
@@ -156,12 +271,12 @@ if __name__ == "__main__":
         print(f"FOLDER_ID={folder_id}")
         print(f"TEMPLATE_KEY={TEMPLATE_KEY}")
         print(f"TEMPLATE_REF={template_ref}")
-        print(f"FIELD_CONTRACT_TYPE={template_ref}:contractType")
+        print(f"FIELD_CONTRACT_TYPE={template_ref}:{type_field}")
         print(f"FIELD_CONTRACT_VALUE={template_ref}:contractValue")
         print()
         print(
-            "If query insights returns 0 right away, wait about a minute "
-            "for the metadata index to update, then run: python app.py"
+            "If Query Insights returns 0 right away, wait about a minute "
+            "for the metadata index to update, then run: python dashboard.py"
         )
     except BoxAPIError as exc:
         status = getattr(exc.response_info, "status_code", "?")

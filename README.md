@@ -14,7 +14,7 @@ optionally group results, and request `count`, `sum`, `avg`, `min`, and `max`
 in a single API call.
 
 This is the companion repository to the tutorial
-**[Build a contract analytics dashboard with query insights](https://developer.box.com/tutorials/query-insights-dashboard)**.
+**[Build a contract analytics dashboard with query insights](https://developer.box.com/tutorials/query-insights)**.
 Clone it, add Client Credentials Grant (CCG) credentials, run the setup
 script, and print a console report you can adapt for a web dashboard or BI
 export.
@@ -26,12 +26,12 @@ Query insights applies filters first, then grouping, then metrics. It does
 
 ## What you get
 
-After setup, `python app.py` authenticates with CCG and:
+After setup, `python dashboard.py` authenticates with CCG and:
 
 - Counts how many sales contracts match a metadata template in a folder.
 - Computes overall average, minimum, and maximum contract values for a date
   range.
-- Returns top contract types by total value (and an `other` bucket when
+- Returns top contract types by document count (and an `other` bucket when
   groups exceed `bucket_limit`).
 
 | Use case | What you compute | Example metrics |
@@ -46,9 +46,10 @@ After setup, `python app.py` authenticates with CCG and:
 
 ```
 query-insights-dashboard/
-├── insights_client.py     # CCG auth + POST /2.0/query/insights helper
+├── box_client.py          # CCG auth
+├── reports.py             # Typed Query Insights v2026.0 calls
+├── dashboard.py           # Console dashboard report
 ├── setup_test_data.py     # Creates template, folder, and tagged samples
-├── app.py                 # Console dashboard report
 ├── requirements.txt
 ├── .env.example
 ├── .gitignore
@@ -70,11 +71,15 @@ query-insights-dashboard/
 You do **not** need an existing metadata template. `setup_test_data.py` creates
 a `sales` template with:
 
-- `contractType` (string)
+- `contractType` (enum: `Sales`, `Renewal`)
 - `contractValue` (float)
 
+Query Insights can group on enum fields, not free-text string fields. Grouping
+on a string `contractType` returns `400 Invalid query request`.
+
 You can also point the app at an existing template with those field keys (or
-change the field env vars to match yours).
+change the field env vars to match yours). If a `sales` template already exists
+with `contractType` as a string, use a new `TEMPLATE_KEY` instead of reusing it.
 
 ## Create and authorize a Box app
 
@@ -90,16 +95,17 @@ change the field env vars to match yours).
    - **Free developer accounts:** authorization usually completes when you
      create the app. If not, use the prompt on the Configuration tab.
    - **Enterprise accounts:** submit the app for admin approval, then an
-     admin authorizes it in Admin Console → **Integrations** / Custom Apps
-     (or [OpenBox settings](https://app.box.com/master/settings/openbox)).
+     admin authorizes it in Admin Console → **Platform** → **Platform Apps**.
    - After you change scopes, **re-authorize** the app.
 
-CCG with `enterprise` as the subject authenticates as the app's **service
+<Note>
+A CCG app authenticates as the app's **service
 account**, not your personal Box user. That service account has its own
 empty folder tree. The setup script writes sample files there.
+</Note>
 
 To see those files in the Box web app, copy the service account email from
-**Developer Console → your app → App Details** and collaborate yourself on
+Developer Console → your app → **App Details** → **Service Account** and collaborate yourself on
 the `Sales Contracts` folder, or open the content as an admin in Content
 Manager. If you instead want to query a folder you already own, invite the
 service account as a collaborator on that folder and set `FOLDER_ID` to it.
@@ -134,13 +140,15 @@ If the app is not authorized you typically see
    pip install -r requirements.txt
    ```
 
+   Install exactly one Box package: `boxsdk`.
+
 3. **Configure credentials**
 
    ```bash
    cp .env.example .env
    ```
 
-   Fill in at least these three values from the Developer Console **now**.
+   Fill in at least the first three values from the Developer Console **now**.
    Leave the folder and template placeholders until after the next step (or
    fill them if you already have a tagged folder):
 
@@ -166,7 +174,8 @@ If the app is not authorized you typically see
 
    The script:
 
-   - Creates enterprise metadata template `sales` (or reuses it if it exists).
+   - Creates enterprise metadata template `sales` with an enum `contractType`
+     (or reuses it if it exists).
    - Creates or reuses a folder named **Sales Contracts** in the service
      account root.
    - Uploads four `.txt` sample contracts and applies metadata (skips a file
@@ -188,30 +197,31 @@ If the app is not authorized you typically see
 ## Run
 
 ```bash
-python app.py
+python dashboard.py
 ```
 
 With the sample data above, a successful run looks like:
 
 ```text
-Contract analytics dashboard
-========================================
 Total contracts: 4
-Value range: avg=123750.0, min=45000.0, max=200000.0
-Top contract types by value:
-  {'contract_type': 'Sales', 'total_value': 300000.0, 'count': 2}
-  {'contract_type': 'Renewal', 'total_value': 195000.0, 'count': 2}
+Value range: avg=123750, min=45000, max=200000
+Top contract types:
+  {'contract_type': 'Sales', 'total_value': 300000, 'count': 2}
+  {'contract_type': 'Renewal', 'total_value': 195000, 'count': 2}
 ```
 
-`app.py` filters value stats to items created between `2020-01-01T00:00:00Z`
-and `2030-01-01T00:00:00Z`. Change those dates in `print_contract_dashboard`
-if you need a different window.
+Buckets are ordered by document count descending, so group order varies with
+your own data.
+
+`dashboard.py` filters value stats to items created between
+`2020-01-01T00:00:00Z` and `2030-01-01T00:00:00Z`. Change those dates in
+`print_contract_dashboard` if you need a different window.
 
 ## Use your own template and folder
 
 You do not have to run `setup_test_data.py`. Point `.env` at any folder the
-service account can read and any template that has a type field and a numeric
-value field:
+service account can read and any template that has an enum type field and a
+numeric value field:
 
 ```bash
 TEMPLATE_KEY=your_template_key
@@ -226,20 +236,26 @@ Keep `ancestors` in the queries so metrics stay scoped to that tree.
 
 ## How the API calls work
 
-`BoxCCGAuth` fetches and refreshes the access token. Query insights has no
-dedicated SDK method, so `insights_client.post_insights` uses `make_request`
-to `POST https://api.box.com/2.0/query/insights`.
+`BoxCCGAuth` fetches and refreshes the access token. The reports call
+`client.query.create_query_insight_v2026_r0`, which sends
+`POST https://api.box.com/2.0/query_insights` with the required
+`box-version: 2026.0` header. Because the method is generated from the API
+spec, you pass typed request objects and read a typed `QueryInsightsV2026R0`
+result instead of assembling JSON by hand.
 
-Each request body has:
+Each request has:
 
 - `query.predicate` — Box query syntax (`EXISTS(:templateArg)`, date
   comparisons, and so on)
 - `query.params` — values for `:placeholders`
 - `query.ancestors` — folder scope (`id` + `type: folder`)
 - `query.group_by` — optional; one field per request; `bucket_limit` defaults
-  to 5 and maxes at 10
+  to 5 and maxes at 10. Group on an enum field such as `contractType`.
 - `metrics` — named metrics (`count`, `sum`, `avg`, `min`, `max`) or `{}`
   for the default `totalResultCount`
+
+Every metric result nests its value under `values`, keyed by the metric type,
+so `metric.values[metric.type]` reads the value without hard-coding the type.
 
 Avoid grouping on high-cardinality fields; cardinality above 10,000 can
 cause errors.
@@ -249,8 +265,9 @@ cause errors.
 Empty `metrics` returns `totalResultCount`:
 
 ```bash
-curl -X POST "https://api.box.com/2.0/query/insights" \
+curl -X POST "https://api.box.com/2.0/query_insights" \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
+  -H "box-version: 2026.0" \
   -H "Content-Type: application/json" \
   -d '{
     "query": {
@@ -261,6 +278,9 @@ curl -X POST "https://api.box.com/2.0/query/insights" \
     "metrics": {}
   }'
 ```
+
+The `box-version: 2026.0` header is required. The SDK method sets it for you,
+so you only pass it when you call the endpoint directly.
 
 Mint `$ACCESS_TOKEN` with CCG (the Python client does this for you):
 
@@ -284,9 +304,9 @@ Named metrics in one call. Example response shape:
       "key": [],
       "type": "overall",
       "metrics": {
-        "avgContractValue": { "type": "avg", "values": { "avg": 123750.0 } },
-        "minContractValue": { "type": "min", "values": { "min": 45000 } },
-        "maxContractValue": { "type": "max", "values": { "max": 200000 } }
+        "avgContractValue": { "type": "avg", "values": { "avg": 45055.5 } },
+        "minContractValue": { "type": "min", "values": { "min": 22000 } },
+        "maxContractValue": { "type": "max", "values": { "max": 75000 } }
       }
     }
   ]
@@ -295,8 +315,9 @@ Named metrics in one call. Example response shape:
 
 ### Grouped chart buckets
 
-`group_by` on `contractType` returns `group` entries (top buckets, ordered
-by document count descending) and optionally an `other` entry for the rest.
+`group_by` on the `contractType` enum returns `group` entries (top buckets,
+ordered by document count descending) and optionally an `other` entry for
+the rest.
 
 ## Response entry types
 
@@ -312,7 +333,9 @@ You cannot customize sort order for grouped buckets.
 
 - **Cache dashboard results.** Refresh on a schedule (for example every 15
   minutes or hourly) instead of calling query insights on every page load.
-  Back off on `429 RATE_LIMIT_EXCEEDED`.
+  The SDK already retries `429 RATE_LIMIT_EXCEEDED` and `5xx` responses with
+  backoff, so cache to reduce the number of calls rather than adding a retry
+  loop of your own.
 - **Scope queries with `ancestors`.** Pass department or program folder IDs
   so each team sees only its content and the service account only needs
   access to those trees.
@@ -329,8 +352,8 @@ You cannot customize sort order for grouped buckets.
 | `unauthorized_client` / app not authorized | CCG app not authorized, or scopes changed | Authorize (or re-authorize) in Developer Console / Admin Console |
 | `404 INSTANCE_NOT_FOUND` | Wrong template reference | Confirm `enterprise_<id>:<templateKey>` matches the template |
 | `403 FORBIDDEN` | Missing scope or inaccessible ancestors | Enable read/write files scope; invite the service account to the folder |
-| `400 BAD_REQUEST` | Invalid predicate or parameter types | Check placeholder names match `params` keys and field types |
-| `429 RATE_LIMIT_EXCEEDED` | Too many requests for the enterprise | Back off and cache dashboard results |
+| `400 BAD_REQUEST` / `400 Invalid query request` | Invalid predicate, parameter types, or grouping on a string field | Check placeholder names and field types; `group_by` needs an enum. If you previously created `sales.contractType` as a string, re-run setup and use the printed `FIELD_CONTRACT_TYPE` (often `...:contractTypeEnum`) |
+| `429 RATE_LIMIT_EXCEEDED` | Too many requests for the enterprise | Cache dashboard results; the SDK already retries with backoff |
 | Metrics return `0` | Index lag, wrong folder, or untagged files | Wait a minute after tagging; confirm `FOLDER_ID` and template fields |
 | Cannot find **Sales Contracts** in box.com | Files live on the **service account**, not your user | Use the service account email / Content Manager, or collaborate yourself |
 | Duplicate sample files | Older setup uploaded without skipping | Current setup skips existing names; delete extras in Box if needed |
